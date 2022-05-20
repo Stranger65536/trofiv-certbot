@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from tests.BaseIntegrationTest import BaseTestCase
 
 
-class TestFoo(BaseTestCase):
+class TestApi(BaseTestCase):
     mock_dry_run_upload: MagicMock
     mock_issue_certificate: MagicMock
 

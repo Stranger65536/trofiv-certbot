@@ -9,6 +9,7 @@ from server import app
 
 
 class BaseTestCase(TestCase):
+
     def create_app(self):
         """
         Creates a test cases-ready flask app
