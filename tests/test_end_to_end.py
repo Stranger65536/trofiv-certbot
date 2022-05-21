@@ -4,7 +4,7 @@ End-to-end tests
 """
 from datetime import datetime
 from os import makedirs
-from os.path import join
+from os.path import join, exists
 from unittest.mock import patch, MagicMock
 
 from BaseIntegrationTest import BaseTestCase
@@ -102,6 +102,7 @@ class EndToEndTests(BaseTestCase):
         }
         response = self.http().post("/certs", json=req)
         self.assert200(response)
+
         secrets_fun: MagicMock = self.mock_secrets_client.return_value \
             .access_secret_version
         secrets_fun.assert_called_once_with(request={
@@ -111,13 +112,53 @@ class EndToEndTests(BaseTestCase):
         dry_run_fun: MagicMock = blob.upload_from_string
         dry_run_fun.assert_called_once_with(data="")
 
+        self.assertEqual(len({
+            self.certbot_env.secret_location,
+            self.certbot_env.logs_dir,
+            self.certbot_env.workspace_dir,
+            self.certbot_env.certificates_dir,
+            self.certbot_env.config_dir
+        }), 5, msg="certbot env directories must be unique")
+
+        self.assertFalse(exists(self.certbot_env.secret_location),
+                         msg="Workspace must be cleaned after call")
+        self.assertFalse(exists(self.certbot_env.logs_dir),
+                         msg="Workspace must be cleaned after call")
+        self.assertFalse(exists(self.certbot_env.workspace_dir),
+                         msg="Workspace must be cleaned after call")
+        self.assertFalse(exists(self.certbot_env.certificates_dir),
+                         msg="Workspace must be cleaned after call")
+        self.assertFalse(exists(self.certbot_env.config_dir),
+                         msg="Workspace must be cleaned after call")
+
+        self.mock_run_subprocess.assert_called_once_with([
+            "certbot", "--noninteractive",
+            f"--config-dir={self.certbot_env.config_dir}",
+            f"--work-dir={self.certbot_env.workspace_dir}",
+            f"--logs-dir={self.certbot_env.logs_dir}",
+            "--force-renewal", "--agree-tos",
+            "--email", "test@example.com",
+            "--manual-public-ip-logging-ok", "certonly",
+            "--dns-google", "--dns-google-credentials",
+            f"{self.certbot_env.secret_location}",
+            "--dns-google-propagation-seconds", "600",
+            "--cert-name", f"{self.certbot_env.cert_name}",
+            "-d", "*.example.com", "-d", "www.example.com"
+        ], timeout=1200, shell=False, stdin=None, )
+
         blob_fun: MagicMock = self.mock_storage_client.return_value \
             .get_bucket.return_value \
             .blob
-        self.assertEqual(blob_fun.call_count, 9)
+        self.assertEqual(blob_fun.call_count, 9,
+                         msg="There are 9 blobs must be uploaded to "
+                             "GCS during call: 4 certificated-related "
+                             "files in 2 directories + 1 log file")
         call_args = [(i[0], i[1]) for i in blob_fun.call_args_list]
         call_sources = [(i[0], i[1], i[2]) for i in blob.method_calls]
-        self.assertEqual(len(call_sources), 9)
+        self.assertEqual(len(call_sources), 9,
+                         msg="There are 9 blobs must be uploaded to "
+                             "GCS during call: 4 certificated-related "
+                             "files in 2 directories + 1 log file")
         call_pairs = list(zip(call_sources, call_args))
 
         text = "upload_from_string"
@@ -144,4 +185,6 @@ class EndToEndTests(BaseTestCase):
             ((file, (f"{base_path}/fullchain.pem",), {}),
              ((f"some-path/{time}/fullchain.pem",), {}))
         ]
-        self.assertCountEqual(call_pairs, expected)
+        self.assertCountEqual(
+            call_pairs, expected,
+            msg="Files are not uploaded to expected locations")
