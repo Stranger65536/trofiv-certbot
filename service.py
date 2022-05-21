@@ -45,7 +45,7 @@ def issue_certificate(req: CertbotRequest) -> Dict[str, str]:
             bucket,
             live_directory
         )
-        now = datetime.now(tz=UTC)
+        now: datetime = datetime.now(tz=UTC)
         timed_directory = join(
             req.target_bucket_path,
             now.strftime("%Y-%m-%d_%H-%M-%S_UTC"))

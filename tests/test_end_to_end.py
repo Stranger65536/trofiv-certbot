@@ -2,10 +2,13 @@
 """
 End-to-end tests
 """
-from base64 import b64encode
+from datetime import datetime
+from os import makedirs
+from os.path import join
 from unittest.mock import patch, MagicMock
 
 from BaseIntegrationTest import BaseTestCase
+from service import prepare_certbot_directory, CertbotEnv
 
 
 class EndToEndTests(BaseTestCase):
@@ -17,6 +20,7 @@ class EndToEndTests(BaseTestCase):
     mock_storage_bucket: MagicMock
     mock_storage_blob: MagicMock
     mock_run_subprocess: MagicMock
+    certbot_env: CertbotEnv
 
     def setUp(self):
         """
@@ -24,21 +28,31 @@ class EndToEndTests(BaseTestCase):
         """
         patcher_secrets_client = patch(
             "service.SecretManagerServiceClient",
-            # autospec=True,
+            autospec=True,
         )
         patcher_storage_client = patch(
             "service.Client",
-            # autospec=True,
+            autospec=True,
         )
         patcher_run_subprocess = patch(
             "service.run_subprocess"
         )
+        patcher_prepare_dir = patch(
+            "service.prepare_certbot_directory"
+        )
+        patcher_datetime = patch(
+            "service.datetime"
+        )
         self.addCleanup(patcher_secrets_client.stop)
         self.addCleanup(patcher_storage_client.stop)
         self.addCleanup(patcher_run_subprocess.stop)
+        self.addCleanup(patcher_prepare_dir.stop)
+        self.addCleanup(patcher_datetime.stop)
         self.mock_secrets_client = patcher_secrets_client.start()
         self.mock_storage_client = patcher_storage_client.start()
         self.mock_run_subprocess = patcher_run_subprocess.start()
+        self.mock_prepare_dir = patcher_prepare_dir.start()
+        self.mock_datetime = patcher_datetime.start()
 
     def test_success_path(self):
         blob: MagicMock = self.mock_storage_client.return_value \
@@ -53,9 +67,28 @@ class EndToEndTests(BaseTestCase):
 
         self.mock_secrets_client.return_value \
             .access_secret_version.return_value \
-            .payload.data = b64encode("some-data".encode("utf-8"))
+            .payload.data = "some-data".encode("utf-8")
 
         self.mock_run_subprocess.return_value = 0, "ok"
+
+        def _intercept_workdir(
+            secret: str,
+            temp_directory: str
+        ) -> CertbotEnv:
+            result: CertbotEnv = \
+                prepare_certbot_directory(secret, temp_directory)
+            certs_dir = result.certificates_dir
+            makedirs(certs_dir)
+            open(join(certs_dir, "certificate.pem"), "a").close()
+            open(join(certs_dir, "privkey.pem"), "a").close()
+            open(join(certs_dir, "chain.pem"), "a").close()
+            open(join(certs_dir, "fullchain.pem"), "a").close()
+            self.certbot_env = result
+            return result
+
+        self.mock_prepare_dir.side_effect = _intercept_workdir
+        self.mock_datetime.now.return_value = datetime(
+            year=1996, month=2, day=22, hour=9, minute=10, second=11)
 
         req = {
             "provider": "google",
@@ -69,3 +102,46 @@ class EndToEndTests(BaseTestCase):
         }
         response = self.http().post("/certs", json=req)
         self.assert200(response)
+        secrets_fun: MagicMock = self.mock_secrets_client.return_value \
+            .access_secret_version
+        secrets_fun.assert_called_once_with(request={
+            "name": "projects/some-project-id/secrets"
+                    "/some-secret-id/versions/latest"
+        })
+        dry_run_fun: MagicMock = blob.upload_from_string
+        dry_run_fun.assert_called_once_with(data="")
+
+        blob_fun: MagicMock = self.mock_storage_client.return_value \
+            .get_bucket.return_value \
+            .blob
+        self.assertEqual(blob_fun.call_count, 9)
+        call_args = [(i[0], i[1]) for i in blob_fun.call_args_list]
+        call_sources = [(i[0], i[1], i[2]) for i in blob.method_calls]
+        self.assertEqual(len(call_sources), 9)
+        call_pairs = list(zip(call_sources, call_args))
+
+        text = "upload_from_string"
+        file = "upload_from_filename"
+        base_path = self.certbot_env.certificates_dir
+        time = "1996-02-22_09-10-11_UTC"
+        expected = [
+            ((text, (), {"data": ""}),
+             ((f"some-path/logs/{time}",), {})),
+            ((file, (f"{base_path}/chain.pem",), {}),
+             (("some-path/live/chain.pem",), {})),
+            ((file, (f"{base_path}/certificate.pem",), {}),
+             (("some-path/live/certificate.pem",), {})),
+            ((file, (f"{base_path}/privkey.pem",), {}),
+             (("some-path/live/privkey.pem",), {})),
+            ((file, (f"{base_path}/fullchain.pem",), {}),
+             (("some-path/live/fullchain.pem",), {})),
+            ((file, (f"{base_path}/chain.pem",), {}),
+             ((f"some-path/{time}/chain.pem",), {})),
+            ((file, (f"{base_path}/certificate.pem",), {}),
+             ((f"some-path/{time}/certificate.pem",), {})),
+            ((file, (f"{base_path}/privkey.pem",), {}),
+             ((f"some-path/{time}/privkey.pem",), {})),
+            ((file, (f"{base_path}/fullchain.pem",), {}),
+             ((f"some-path/{time}/fullchain.pem",), {}))
+        ]
+        self.assertCountEqual(call_pairs, expected)
