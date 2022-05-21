@@ -111,8 +111,8 @@ def call_certbot(
             shell=False,
             stdin=None,
         )
-    except TimeoutExpired:
-        raise CertbotTimeoutError(command, timeout, out)
+    except TimeoutExpired as e:
+        raise CertbotTimeoutError(command, timeout, e.output)
     except Exception:
         raise CertbotError(command, timeout, out)
     if code:
