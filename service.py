@@ -191,7 +191,7 @@ def upload_directory_to_gcs(
     info(f"Uploading directory '{source_path}' content to "
          f"gs://{bucket.name}/{gcs_path}")
     for root, _, files in walk(source_path):
-        for file in files:
+        for file in sorted(files):
             rel_dir: str = relpath(root, source_path)
             rel_file: str = join(rel_dir, file)
             bucket_path: str = normpath(join(gcs_path, rel_file))

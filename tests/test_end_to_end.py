@@ -7,7 +7,7 @@ from itertools import zip_longest
 from os import makedirs
 from os.path import join, exists
 from subprocess import TimeoutExpired
-from typing import Callable, Any, List, Tuple, Optional
+from typing import Callable, Any, List, Tuple, Optional, Dict
 from unittest.mock import patch, MagicMock
 
 from BaseIntegrationTest import BaseTestCase
@@ -24,6 +24,9 @@ class EndToEndTests(BaseTestCase):
     mock_storage_blob: MagicMock
     mock_run_subprocess: MagicMock
     certbot_env: CertbotEnv
+
+    bucket: MagicMock
+    blob: MagicMock
 
     def setUp(self):
         """
@@ -57,21 +60,25 @@ class EndToEndTests(BaseTestCase):
         self.mock_prepare_dir = patcher_prepare_dir.start()
         self.mock_datetime = patcher_datetime.start()
 
-        self.maxDiff = None
+        self.bucket = self.mock_storage_client.return_value \
+            .get_bucket.return_value
+        self.blob = self.bucket.blob.return_value
 
-    def test_success_path(self):
-        blob: MagicMock = self.mock_storage_client.return_value \
-            .get_bucket.return_value \
-            .blob.return_value
-        blob.upload_from_string.return_value = None
-        blob.upload_from_filename.return_value = None
-
+        # some default behavior stuff
+        self.bucket.name = "some-bucket"
+        self.blob.upload_from_string.return_value = None
+        self.blob.upload_from_filename.return_value = None
         self.mock_secrets_client.return_value \
             .access_secret_version.return_value \
             .payload.data = "some-data".encode("utf-8")
         self.mock_run_subprocess.return_value = 0, "ok"
         self.mock_datetime.now.return_value = datetime(
             year=1996, month=2, day=22, hour=9, minute=10, second=11)
+        self.mocked_time = "1996-02-22_09-10-11_UTC"
+
+        self.maxDiff = None
+
+    def test_success_path(self):
         self._mock_cert_files_creation()
 
         req = {
@@ -86,6 +93,14 @@ class EndToEndTests(BaseTestCase):
         }
         response = self.http().post("/certs", json=req)
         self.assert200(response)
+        self.assertEqual(response.json, {
+            "result": {
+                "live_gcs_path": "gs://some-bucket/some-path/live",
+                "timed_gcs_path": "gs://some-bucket/some-path"
+                                  "/1996-02-22_09-10-11_UTC"
+            },
+            "success": True
+        })
 
         self._assert_secret_fetch()
         self._assert_certbot_env()
@@ -109,21 +124,10 @@ class EndToEndTests(BaseTestCase):
         self._assert_file_uploads([
             "chain.pem", "certificate.pem",
             "fullchain.pem", "privkey.pem"
-        ], expect_log_file=True, time="1996-02-22_09-10-11_UTC")
+        ], expect_log_file=True, time=self.mocked_time)
 
     def test_certbot_failed(self):
-        blob: MagicMock = self.mock_storage_client.return_value \
-            .get_bucket.return_value \
-            .blob.return_value
-        blob.upload_from_string.return_value = None
-        blob.upload_from_filename.return_value = None
-
-        self.mock_secrets_client.return_value \
-            .access_secret_version.return_value \
-            .payload.data = "some-data".encode("utf-8")
         self.mock_run_subprocess.return_value = 1, "something is wrong"
-        self.mock_datetime.now.return_value = datetime(
-            year=1996, month=2, day=22, hour=9, minute=10, second=11)
         self._intercept_workdir(lambda *args: None)
 
         req = {
@@ -178,25 +182,13 @@ class EndToEndTests(BaseTestCase):
 
         self._assert_file_uploads(
             [], expect_log_file=True,
-            time="1996-02-22_09-10-11_UTC"
+            time=self.mocked_time,
         )
 
     def test_certbot_timeout(self):
-        blob: MagicMock = self.mock_storage_client.return_value \
-            .get_bucket.return_value \
-            .blob.return_value
-        blob.upload_from_string.return_value = None
-        blob.upload_from_filename.return_value = None
-
-        self.mock_secrets_client.return_value \
-            .access_secret_version.return_value \
-            .payload.data = "some-data".encode("utf-8")
-
         self.mock_run_subprocess.side_effect = \
             TimeoutExpired(["a", "command"], timeout=1,
                            output="some output")
-        self.mock_datetime.now.return_value = datetime(
-            year=1996, month=2, day=22, hour=9, minute=10, second=11)
         self._intercept_workdir(lambda *args: None)
 
         req = {
@@ -251,23 +243,12 @@ class EndToEndTests(BaseTestCase):
 
         self._assert_file_uploads(
             [], expect_log_file=True,
-            time="1996-02-22_09-10-11_UTC"
+            time=self.mocked_time
         )
 
     def test_dry_upload_failed(self):
-        blob: MagicMock = self.mock_storage_client.return_value \
-            .get_bucket.return_value \
-            .blob.return_value
-        blob.upload_from_string.side_effect = ValueError("some-err")
-        blob.upload_from_filename.return_value = None
-
-        self.mock_secrets_client.return_value \
-            .access_secret_version.return_value \
-            .payload.data = "some-data".encode("utf-8")
-
-        self.mock_run_subprocess.return_value = 0, "ok"
-        self.mock_datetime.now.return_value = datetime(
-            year=1996, month=2, day=22, hour=9, minute=10, second=11)
+        self.blob.upload_from_string.side_effect = \
+            ValueError("some-err")
         self._intercept_workdir(lambda *args: None)
 
         req = {
@@ -283,7 +264,6 @@ class EndToEndTests(BaseTestCase):
 
         response = self.http().post("/certs", json=req)
         self.assert500(response)
-
         self.assertEqual(response.json, {
             "error": {
                 "bucket": "some-bucket",
@@ -301,22 +281,12 @@ class EndToEndTests(BaseTestCase):
 
         self._assert_file_uploads(
             [], expect_log_file=True,
-            time="1996-02-22_09-10-11_UTC",
+            time=self.mocked_time,
         )
 
     def test_secret_fetch_failed(self):
-        blob: MagicMock = self.mock_storage_client.return_value \
-            .get_bucket.return_value \
-            .blob.return_value
-        blob.upload_from_string.return_value = None
-        blob.upload_from_filename.return_value = None
-
         self.mock_secrets_client.return_value \
             .access_secret_version.side_effect = ValueError("some-err")
-
-        self.mock_run_subprocess.return_value = 0, "ok"
-        self.mock_datetime.now.return_value = datetime(
-            year=1996, month=2, day=22, hour=9, minute=10, second=11)
         self._intercept_workdir(lambda *args: None)
 
         req = {
@@ -332,7 +302,6 @@ class EndToEndTests(BaseTestCase):
 
         response = self.http().post("/certs", json=req)
         self.assert500(response)
-
         self.assertEqual(response.json, {
             "error": {
                 "message": "There is a problem with DNS provider "
@@ -348,7 +317,63 @@ class EndToEndTests(BaseTestCase):
 
         self._assert_file_uploads(
             [], expect_log_file=True,
-            time="1996-02-22_09-10-11_UTC",
+            time=self.mocked_time,
+        )
+
+    def test_upload_failed(self):
+        self.blob.upload_from_filename.side_effect = \
+            ValueError("some-err")
+        self._mock_cert_files_creation()
+
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+        self.assertEqual(response.json, {
+            "error": {
+                "bucket": "some-bucket",
+                "bucket_path": "some-path/live/certificate.pem",
+                "message": "There is a problem with "
+                           "file upload to GCS.",
+                "source_path": f"{self.certbot_env.certificates_dir}"
+                               f"/certificate.pem",
+                "type": "GCSUploadError"
+            },
+            "success": False
+        })
+
+        self._assert_secret_fetch()
+        self._assert_certbot_env()
+        self._assert_certbot_workdir_cleaned()
+
+        self.mock_run_subprocess.assert_called_once_with([
+            "certbot", "--noninteractive",
+            f"--config-dir={self.certbot_env.config_dir}",
+            f"--work-dir={self.certbot_env.workspace_dir}",
+            f"--logs-dir={self.certbot_env.logs_dir}",
+            "--force-renewal", "--agree-tos",
+            "--email", "test@example.com",
+            "--manual-public-ip-logging-ok", "certonly",
+            "--dns-google", "--dns-google-credentials",
+            f"{self.certbot_env.secret_location}",
+            "--dns-google-propagation-seconds", "600",
+            "--cert-name", f"{self.certbot_env.cert_name}",
+            "-d", "*.example.com", "-d", "www.example.com"
+        ], timeout=1200, shell=False, stdin=None, )
+
+        self._assert_file_uploads([
+            "certificate.pem"
+        ], expect_log_file=True,
+            time=self.mocked_time,
+            live_only={"certificate.pem": True}
         )
 
     def _assert_certbot_workdir_cleaned(self):
@@ -407,7 +432,8 @@ class EndToEndTests(BaseTestCase):
         self,
         expected_files: List[str],
         expect_log_file: bool,
-        time: Optional[str] = None
+        time: Optional[str] = None,
+        live_only: Dict[str, bool] = None,
     ) -> None:
         if (expected_files or expect_log_file) and not time:
             raise ValueError("Time is optional only for no upload case")
@@ -427,12 +453,16 @@ class EndToEndTests(BaseTestCase):
         if expected_files:
             file = "upload_from_filename"
             base_path = self.certbot_env.certificates_dir
-            expected.extend([i for j in [[
-                ((file, (f"{base_path}/{i}",), {}),
-                 ((f"some-path/live/{i}",), {})),
-                ((file, (f"{base_path}/{i}",), {}),
-                 ((f"some-path/{time}/{i}",), {}))
-            ] for i in expected_files] for i in j])
+            for i in expected_files:
+                expected.append(
+                    ((file, (f"{base_path}/{i}",), {}),
+                     ((f"some-path/live/{i}",), {}))
+                )
+                if not live_only or not live_only.get(i):
+                    expected.append(
+                        ((file, (f"{base_path}/{i}",), {}),
+                         ((f"some-path/{time}/{i}",), {}))
+                    )
 
         if expect_log_file:
             expected.append((
