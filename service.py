@@ -9,7 +9,7 @@ from os import makedirs, walk
 from os.path import join, relpath, normpath
 from subprocess import TimeoutExpired
 from tempfile import TemporaryDirectory
-from typing import List, Dict, Optional
+from typing import List, Dict
 from uuid import uuid4
 
 # noinspection PyPackageRequirements
@@ -34,7 +34,7 @@ def issue_certificate(req: CertbotRequest) -> Dict[str, str]:
 
     with TemporaryDirectory(prefix="certbot-") as d:
         certificates_dir: str = call_certbot(provider, req, d)
-        client = get_storage_client(req.project)
+        client = Client(req.project)
         try:
             bucket: Bucket = client.get_bucket(req.target_bucket)
         except Exception:
@@ -166,7 +166,7 @@ def dry_run_upload(req: CertbotRequest) -> None:
     gcs_path: str = join(req.target_bucket_path, "logs",
                          now.strftime("%Y-%m-%d_%H-%M-%S_UTC"))
     try:
-        client = get_storage_client(req.project)
+        client = Client(req.project)
         bucket: Bucket = client.get_bucket(req.target_bucket)
         info(f"Uploading log file to {gcs_path}")
         blob: Blob = bucket.blob(gcs_path)
@@ -220,22 +220,6 @@ def upload_file_to_gcs(
             bucket_name=bucket.name,
             bucket_path=gcs_path
         )
-
-
-def get_storage_client(
-    project: str,
-    sa_path: Optional[str] = None
-) -> Client:
-    """
-    Gets GCS client
-    """
-    if sa_path:
-        info("Using provided SA to authenticate")
-        return Client.from_service_account_json(sa_path,
-                                                project=project)
-    else:
-        info("Using environment-based SA to authenticate")
-        return Client(project=project)
 
 
 def get_secret_value(project: str, secret_id: str) -> str:
