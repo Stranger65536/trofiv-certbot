@@ -7,7 +7,7 @@ from itertools import zip_longest
 from os import makedirs
 from os.path import join, exists
 from subprocess import TimeoutExpired
-from typing import Callable, Any, List, Tuple
+from typing import Callable, Any, List, Tuple, Optional
 from unittest.mock import patch, MagicMock
 
 from BaseIntegrationTest import BaseTestCase
@@ -160,8 +160,10 @@ class EndToEndTests(BaseTestCase):
                 "message": "Certbot instance failed",
                 "output": ["something is wrong"],
                 "timeout": 1200,
-                "type": "CertbotError"},
-            "success": False})
+                "type": "CertbotError"
+            },
+            "success": False
+        })
 
         self._assert_secret_fetch()
         self._assert_certbot_env()
@@ -231,8 +233,10 @@ class EndToEndTests(BaseTestCase):
                 "message": "Certbot instance aborted by timeout",
                 "output": ["some output"],
                 "timeout": 1200,
-                "type": "CertbotTimeoutError"},
-            "success": False})
+                "type": "CertbotTimeoutError"
+            },
+            "success": False
+        })
 
         self._assert_secret_fetch()
         self._assert_certbot_env()
@@ -248,6 +252,56 @@ class EndToEndTests(BaseTestCase):
         self._assert_file_uploads(
             [], expect_log_file=True,
             time="1996-02-22_09-10-11_UTC"
+        )
+
+    def test_dry_upload_failed(self):
+        blob: MagicMock = self.mock_storage_client.return_value \
+            .get_bucket.return_value \
+            .blob.return_value
+        blob.upload_from_string.side_effect = ValueError("some-err")
+        blob.upload_from_filename.return_value = None
+
+        self.mock_secrets_client.return_value \
+            .access_secret_version.return_value \
+            .payload.data = "some-data".encode("utf-8")
+
+        self.mock_run_subprocess.return_value = 0, "ok"
+        self.mock_datetime.now.return_value = datetime(
+            year=1996, month=2, day=22, hour=9, minute=10, second=11)
+        self._intercept_workdir(lambda *args: None)
+
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+
+        self.assertEqual(response.json, {
+            "error": {
+                "bucket": "some-bucket",
+                "bucket_path": "some-path/logs/1996-02-22_09-10-11_UTC",
+                "message": "There is a problem with "
+                           "file upload to GCS.",
+                "source_path": "Empty log file",
+                "type": "GCSUploadError"
+            },
+            "success": False
+        })
+
+        self._assert_secret_no_fetch()
+        self.mock_run_subprocess.assert_not_called()
+
+        self._assert_file_uploads(
+            [], expect_log_file=True,
+            time="1996-02-22_09-10-11_UTC",
         )
 
     def _assert_certbot_workdir_cleaned(self):
@@ -306,8 +360,11 @@ class EndToEndTests(BaseTestCase):
         self,
         expected_files: List[str],
         expect_log_file: bool,
-        time: str
+        time: Optional[str] = None
     ) -> None:
+        if (expected_files or expect_log_file) and not time:
+            raise ValueError("Time is optional only for no upload case")
+
         blob_fun: MagicMock = self.mock_storage_client.return_value \
             .get_bucket.return_value \
             .blob
@@ -317,15 +374,18 @@ class EndToEndTests(BaseTestCase):
         self.assertEqual(len(call_args), len(call_sources),
                          msg="Blob operations call count mismatch")
         call_pairs = list(zip_longest(call_sources, call_args))
-        text = "upload_from_string"
-        file = "upload_from_filename"
-        base_path = self.certbot_env.certificates_dir
-        expected: List[Tuple] = [i for j in [[
-            ((file, (f"{base_path}/{i}",), {}),
-             ((f"some-path/live/{i}",), {})),
-            ((file, (f"{base_path}/{i}",), {}),
-             ((f"some-path/{time}/{i}",), {}))
-        ] for i in expected_files] for i in j]
+
+        expected: List[Tuple] = []
+
+        if expected_files:
+            file = "upload_from_filename"
+            base_path = self.certbot_env.certificates_dir
+            expected.extend([i for j in [[
+                ((file, (f"{base_path}/{i}",), {}),
+                 ((f"some-path/live/{i}",), {})),
+                ((file, (f"{base_path}/{i}",), {}),
+                 ((f"some-path/{time}/{i}",), {}))
+            ] for i in expected_files] for i in j])
 
         if expect_log_file:
             expected.append((
@@ -344,3 +404,8 @@ class EndToEndTests(BaseTestCase):
             "name": "projects/some-project-id/secrets"
                     "/some-secret-id/versions/latest"
         })
+
+    def _assert_secret_no_fetch(self):
+        secrets_fun: MagicMock = self.mock_secrets_client.return_value \
+            .access_secret_version
+        secrets_fun.assert_not_called()
