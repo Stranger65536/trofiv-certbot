@@ -304,6 +304,53 @@ class EndToEndTests(BaseTestCase):
             time="1996-02-22_09-10-11_UTC",
         )
 
+    def test_secret_fetch_failed(self):
+        blob: MagicMock = self.mock_storage_client.return_value \
+            .get_bucket.return_value \
+            .blob.return_value
+        blob.upload_from_string.return_value = None
+        blob.upload_from_filename.return_value = None
+
+        self.mock_secrets_client.return_value \
+            .access_secret_version.side_effect = ValueError("some-err")
+
+        self.mock_run_subprocess.return_value = 0, "ok"
+        self.mock_datetime.now.return_value = datetime(
+            year=1996, month=2, day=22, hour=9, minute=10, second=11)
+        self._intercept_workdir(lambda *args: None)
+
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+
+        self.assertEqual(response.json, {
+            "error": {
+                "message": "There is a problem with DNS provider "
+                           "secret fetch error. "
+                           "Check logs for details.",
+                "type": "SecretFetchError",
+            },
+            "success": False,
+        })
+
+        self._assert_secret_fetch()
+        self.mock_run_subprocess.assert_not_called()
+
+        self._assert_file_uploads(
+            [], expect_log_file=True,
+            time="1996-02-22_09-10-11_UTC",
+        )
+
     def _assert_certbot_workdir_cleaned(self):
         self.assertFalse(exists(self.certbot_env.secret_location),
                          msg="Workspace must be cleaned after call")
