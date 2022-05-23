@@ -11,7 +11,8 @@ from typing import Callable, Any, List, Tuple, Optional, Dict
 from unittest.mock import patch, MagicMock
 
 from BaseIntegrationTest import BaseTestCase
-from service import prepare_certbot_directory, CertbotEnv
+from service import prepare_certbot_directory, CertbotEnv, \
+    issue_certificate
 
 
 class EndToEndTests(BaseTestCase):
@@ -23,6 +24,7 @@ class EndToEndTests(BaseTestCase):
     mock_storage_bucket: MagicMock
     mock_storage_blob: MagicMock
     mock_run_subprocess: MagicMock
+    mock_issue_certs: MagicMock
     certbot_env: CertbotEnv
 
     bucket: MagicMock
@@ -49,16 +51,21 @@ class EndToEndTests(BaseTestCase):
         patcher_datetime = patch(
             "service.datetime"
         )
+        patcher_issue_certs = patch(
+            "server.issue_certificate"
+        )
         self.addCleanup(patcher_secrets_client.stop)
         self.addCleanup(patcher_storage_client.stop)
         self.addCleanup(patcher_run_subprocess.stop)
         self.addCleanup(patcher_prepare_dir.stop)
         self.addCleanup(patcher_datetime.stop)
+        self.addCleanup(patcher_issue_certs.stop)
         self.mock_secrets_client = patcher_secrets_client.start()
         self.mock_storage_client = patcher_storage_client.start()
         self.mock_run_subprocess = patcher_run_subprocess.start()
         self.mock_prepare_dir = patcher_prepare_dir.start()
         self.mock_datetime = patcher_datetime.start()
+        self.mock_issue_certs = patcher_issue_certs.start()
 
         self.bucket = self.mock_storage_client.return_value \
             .get_bucket.return_value
@@ -75,7 +82,7 @@ class EndToEndTests(BaseTestCase):
         self.mock_datetime.now.return_value = datetime(
             year=1996, month=2, day=22, hour=9, minute=10, second=11)
         self.mocked_time = "1996-02-22_09-10-11_UTC"
-
+        self.mock_issue_certs.side_effect = issue_certificate
         self.maxDiff = None
 
     def test_success_path(self):
@@ -185,6 +192,97 @@ class EndToEndTests(BaseTestCase):
             time=self.mocked_time,
         )
 
+    def test_certbot_failed_exc(self):
+        self.mock_run_subprocess.return_value = OSError("some-err")
+        self._intercept_workdir(lambda *args: None)
+
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+
+        expected_certbot_command = [
+            "certbot", "--noninteractive",
+            f"--config-dir={self.certbot_env.config_dir}",
+            f"--work-dir={self.certbot_env.workspace_dir}",
+            f"--logs-dir={self.certbot_env.logs_dir}",
+            "--force-renewal", "--agree-tos",
+            "--email", "test@example.com",
+            "--manual-public-ip-logging-ok", "certonly",
+            "--dns-google", "--dns-google-credentials",
+            f"{self.certbot_env.secret_location}",
+            "--dns-google-propagation-seconds", "600",
+            "--cert-name", f"{self.certbot_env.cert_name}",
+            "-d", "*.example.com", "-d", "www.example.com"
+        ]
+        self.assertEqual(response.json, {
+            "error": {
+                "command": expected_certbot_command,
+                "message": "Certbot instance failed",
+                "output": [""],
+                "timeout": 1200,
+                "type": "CertbotError"
+            },
+            "success": False
+        })
+
+        self._assert_secret_fetch()
+        self._assert_certbot_env()
+        self._assert_certbot_workdir_cleaned()
+
+        self.mock_run_subprocess.assert_called_once_with(
+            expected_certbot_command,
+            timeout=1200,
+            shell=False,
+            stdin=None,
+        )
+
+        self._assert_file_uploads(
+            [], expect_log_file=True,
+            time=self.mocked_time,
+        )
+
+    def test_generic_err(self):
+        self.mock_issue_certs.side_effect = ValueError("some-err")
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+        self.assertEqual(response.json, {
+            "error": {
+                "message": "Generic error happened. "
+                           "Check logs for details",
+                "type": "ValueError"
+            },
+            "success": False,
+        })
+
+        self._assert_secret_no_fetch()
+        self.mock_run_subprocess.assert_not_called()
+
+        self._assert_file_uploads(
+            [], expect_log_file=True,
+            time=self.mocked_time,
+        )
+
     def test_certbot_timeout(self):
         self.mock_run_subprocess.side_effect = \
             TimeoutExpired(["a", "command"], timeout=1,
@@ -278,6 +376,57 @@ class EndToEndTests(BaseTestCase):
 
         self._assert_secret_no_fetch()
         self.mock_run_subprocess.assert_not_called()
+
+        self._assert_file_uploads(
+            [], expect_log_file=True,
+            time=self.mocked_time,
+        )
+
+    def test_bucket_err(self):
+        self._mock_cert_files_creation()
+        self.mock_storage_client.return_value.get_bucket.side_effect = [
+            self.bucket, ValueError("bucket get error")
+        ]
+
+        req = {
+            "provider": "google",
+            "secret_id": "some-secret-id",
+            "project": "some-project-id",
+            "domains": ["*.example.com", "www.example.com"],
+            "propagation_seconds": 600,
+            "email": "test@example.com",
+            "target_bucket": "some-bucket",
+            "target_bucket_path": "some-path",
+        }
+
+        response = self.http().post("/certs", json=req)
+        self.assert500(response)
+        self.assertEqual(response.json, {
+            "error": {
+                "message": "Generic error happened. "
+                           "Check logs for details",
+                "type": "GCSError"},
+            "success": False
+        })
+
+        self._assert_secret_fetch()
+        self._assert_certbot_env()
+        self._assert_certbot_workdir_cleaned()
+
+        self.mock_run_subprocess.assert_called_once_with([
+            "certbot", "--noninteractive",
+            f"--config-dir={self.certbot_env.config_dir}",
+            f"--work-dir={self.certbot_env.workspace_dir}",
+            f"--logs-dir={self.certbot_env.logs_dir}",
+            "--force-renewal", "--agree-tos",
+            "--email", "test@example.com",
+            "--manual-public-ip-logging-ok", "certonly",
+            "--dns-google", "--dns-google-credentials",
+            f"{self.certbot_env.secret_location}",
+            "--dns-google-propagation-seconds", "600",
+            "--cert-name", f"{self.certbot_env.cert_name}",
+            "-d", "*.example.com", "-d", "www.example.com"
+        ], timeout=1200, shell=False, stdin=None, )
 
         self._assert_file_uploads(
             [], expect_log_file=True,

@@ -3,6 +3,7 @@
 Server entry point
 """
 from logging import info, exception
+from os import getenv
 from typing import Dict
 from wsgiref.simple_server import WSGIServer
 
@@ -12,8 +13,8 @@ from flask import Flask, jsonify, request
 from marshmallow import ValidationError
 
 from dto import CertbotRequest
-from errors import SecretFetchError, CertbotTimeoutError, CertbotError, \
-    GCSUploadError
+from errors import SecretFetchError, CertbotTimeoutError, \
+    CertbotError, GCSUploadError
 from service import dry_run_upload, issue_certificate
 from utils import configure_logger
 
@@ -149,7 +150,7 @@ def init_server() -> WSGIServer:
     """
     Init server
     """
-    port: int = 8080
+    port: int = int(getenv("PORT", "8080"))
     # noinspection HttpUrlsUsage
     info("App is about to start, visit http://{}:{}"
          .format("0.0.0.0", port))
@@ -159,7 +160,10 @@ def init_server() -> WSGIServer:
                       request_queue_size=50)
 
 
-if __name__ == "__main__":
+def main():
+    """
+    Entrypoint
+    """
     configure_logger()
     server = init_server()
     # noinspection PyBroadException
@@ -171,3 +175,7 @@ if __name__ == "__main__":
         exception("Server stopped")
     finally:
         server.stop()
+
+
+if __name__ == "__main__":
+    main()
