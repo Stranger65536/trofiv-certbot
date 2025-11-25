@@ -90,7 +90,6 @@ def call_certbot(
         "--agree-tos",
         "--email",
         f"{req.email}",
-        "--manual-public-ip-logging-ok",
         "certonly",
         *name_options,
         secret_path_option,
@@ -171,7 +170,7 @@ def dry_run_upload(req: CertbotRequest) -> None:
         info(f"Uploading log file to {gcs_path}")
         blob: Blob = bucket.blob(gcs_path)
         blob.upload_from_string(data="")
-        info(f"Upload of log file has completed")
+        info("Upload of log file has completed")
     except Exception:
         raise GCSUploadError(
             "Empty log file",

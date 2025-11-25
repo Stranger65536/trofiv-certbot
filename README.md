@@ -546,14 +546,16 @@ so creation of "uber role" is quite necessary
 #### 4.4 Grant the service account write permission to GCS bucket
 
 ```bash
-> gsutil iam ch serviceAccount:${GCP_SVC_ACC_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com:roles/storage.legacyBucketWriter "${GCP_CERTS_BUCKET}"
+> gcloud storage buckets add-iam-policy-binding "${GCP_CERTS_BUCKET}" \
+  --member="serviceAccount:${GCP_SVC_ACC_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/storage.legacyBucketWriter"
 ```
 
 #### 4.5 Grant the service account secret read permissions
 
 ```bash
 > gcloud secrets add-iam-policy-binding "${GCP_SECRET_ID}" \
-    --member="${GCP_SVC_ACC_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+    --member="serviceAccount:${GCP_SVC_ACC_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
     --role="roles/secretmanager.secretAccessor"
 ```
 
