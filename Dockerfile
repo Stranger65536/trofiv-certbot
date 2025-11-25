@@ -1,6 +1,6 @@
-FROM python:3.9.4-slim-buster
+FROM python:3.12-slim
 WORKDIR /app
-ADD requirements.txt /app
+COPY requirements.txt /app
 RUN pip3 install -r requirements.txt
-ADD . /app
+COPY . /app
 ENTRYPOINT ["python3", "-u", "server.py"]
